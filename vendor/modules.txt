@@ -1,0 +1,5 @@
+# github.com/BattlesnakeOfficial/rules v1.2.3
+## explicit; go 1.18
+github.com/BattlesnakeOfficial/rules
+github.com/BattlesnakeOfficial/rules/client
+github.com/BattlesnakeOfficial/rules/maps

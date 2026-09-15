@@ -1,0 +1,13 @@
+{
+  "food_weight": 15,
+  "head_risk": 20000,
+  "hunger_threshold": 45,
+  "kind": "heuristic",
+  "lookahead": true,
+  "name": "successor",
+  "space_weight": 10,
+  "successor_lookahead": true,
+  "tail_weight": 50,
+  "territory_weight": 3,
+  "trap_penalty": 3000
+}

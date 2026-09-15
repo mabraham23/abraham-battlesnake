@@ -1,0 +1,9 @@
+entrypoint = "main.go"
+run = ["sh", "start.sh"]
+
+[deployment]
+run = ["sh", "start.sh"]
+
+[[ports]]
+localPort = 8000
+externalPort = 80
