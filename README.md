@@ -1,8 +1,8 @@
-# Abraham Successor
+# Abraham Survival Five — trial
 
-A Go Battlesnake for early Summit 2026 practice games. The selected `successor` policy uses
+A Go Battlesnake for early Summit 2026 practice games. The selected `day-02-2` policy uses
 collision checks, flood fill, food search, territory estimates and bounded successor-board
-lookahead. This is a provisional trial build, not a statistically confirmed tournament winner.
+lookahead with a five-turn survival priority. This is a provisional trial build, not a statistically confirmed tournament winner.
 
 ## Run
 
@@ -28,10 +28,11 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false -o bin/
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -buildvcs=false -o bin/abraham-linux-arm64 .
 ```
 
-The native trial build passed API lifecycle checks and 45 fixture moves at 100, 250 and
-500 ms advertised timeouts, with a maximum local response of 13.82 ms. Hosted latency
-must be checked separately. The initial exploratory screen recorded 19 wins in 48 games;
-the broader comparison is still in progress, so this does not establish general superiority.
+The frozen candidate passed a 240-game independent local comparison: 32 wins in 120 games
+versus the published baseline's 26 in 120. Both had zero request faults. Self-collisions
+increased despite fewer head-collision losses. A reserved follow-up stopped on an opponent's
+invalid move before this candidate played; it is inconclusive. Hosted comparisons are pending.
+The packaged native build passed 45 fixture moves; hosted latency must be checked separately.
 
 ## Source and licenses
 

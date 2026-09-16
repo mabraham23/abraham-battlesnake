@@ -25,6 +25,8 @@ type Policy struct {
 	Lookahead          bool    `json:"lookahead"`
 	SuccessorLookahead bool    `json:"successor_lookahead,omitempty"`
 	SuccessorBudgetMS  int     `json:"successor_budget_ms,omitempty"`
+	MobilityWeight     float64 `json:"mobility_weight,omitempty"`
+	SurvivalDepth      int     `json:"survival_depth,omitempty"`
 }
 
 func defaultPolicies() []Policy {
@@ -45,7 +47,7 @@ func validatePolicy(p Policy) error {
 	if p.Kind != "baseline" && p.Kind != "heuristic" {
 		return fmt.Errorf("policy %q kind must be baseline or heuristic", p.Name)
 	}
-	for _, value := range []float64{p.SpaceWeight, p.FoodWeight, p.TerritoryWeight, p.TailWeight, p.HeadRisk, p.TrapPenalty} {
+	for _, value := range []float64{p.SpaceWeight, p.FoodWeight, p.TerritoryWeight, p.TailWeight, p.HeadRisk, p.TrapPenalty, p.MobilityWeight} {
 		if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || value > 100000 {
 			return fmt.Errorf("policy %q weights must be finite and between 0 and 100000", p.Name)
 		}
@@ -55,6 +57,9 @@ func validatePolicy(p Policy) error {
 	}
 	if p.SuccessorBudgetMS < 0 || p.SuccessorBudgetMS > 200 {
 		return fmt.Errorf("policy %q successor budget must be between 0 and 200 milliseconds", p.Name)
+	}
+	if p.SurvivalDepth != 0 && (p.SurvivalDepth < 2 || p.SurvivalDepth > 5) {
+		return fmt.Errorf("policy %q survival depth must be zero or between two and five turns", p.Name)
 	}
 	return nil
 }
@@ -115,7 +120,7 @@ func selectMoveContext(ctx context.Context, arrived time.Time, state GameState, 
 		blocked[cell] = true
 	}
 	var safe map[string]bool
-	if p.Lookahead || p.SuccessorLookahead {
+	if p.Lookahead || p.SuccessorLookahead || p.SurvivalDepth > 0 {
 		safe = policySafeMovesWithBudget(state, budget)
 		for _, dir := range directions {
 			if safe[dir.name] {
@@ -232,9 +237,20 @@ candidateLoop:
 		candidates = append(candidates, policyCandidate{dir.name, score})
 	}
 	if p.SuccessorLookahead && !budget.stopped() {
-		penalties := policySuccessorPenalties(state, candidates, safe, budget, p.SuccessorBudgetMS)
+		penalties := policySuccessorPenalties(state, candidates, safe, budget, p)
 		for i := range candidates {
-			candidates[i].score -= p.TrapPenalty * penalties[candidates[i].move]
+			candidates[i].score -= penalties[candidates[i].move]
+		}
+	}
+	var survival map[string]bool
+	if p.SurvivalDepth > 0 && !budget.stopped() {
+		survival = policySurvivalMoves(state, candidates, safe, budget, p.SurvivalDepth)
+	}
+	preferSurvival := false
+	for _, candidate := range candidates {
+		if survival[candidate.move] {
+			preferSurvival = true
+			fallback = candidate.move
 		}
 	}
 	stopped := budget.stopped()
@@ -254,6 +270,9 @@ candidateLoop:
 	}
 	for _, candidate := range candidates {
 		if preferSafe && !safe[candidate.move] {
+			continue
+		}
+		if preferSurvival && !survival[candidate.move] {
 			continue
 		}
 		if candidate.score > bestScore {

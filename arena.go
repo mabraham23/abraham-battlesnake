@@ -54,17 +54,27 @@ type SnakeMetrics struct {
 	Eliminated     string  `json:"eliminated"`
 	EliminatedTurn int     `json:"eliminated_turn"`
 }
+type ArenaDecision struct {
+	Turn         int     `json:"turn"`
+	Seat         int     `json:"seat"`
+	ElapsedMS    float64 `json:"elapsed_ms"`
+	ResponseMove string  `json:"response_move"`
+	Move         string  `json:"move"`
+	Timeout      bool    `json:"timeout"`
+	Error        string  `json:"error,omitempty"`
+}
 type ArenaResult struct {
-	ID           string         `json:"id"`
-	Seed         int64          `json:"seed"`
-	Winner       int            `json:"winner"`
-	Turns        int            `json:"turns"`
-	Truncated    bool           `json:"truncated"`
-	Error        string         `json:"error,omitempty"`
-	Snakes       []SnakeMetrics `json:"snakes"`
-	Frames       []GameState    `json:"frames,omitempty"`
-	LastDecision *GameState     `json:"last_decision,omitempty"`
-	LastMove     string         `json:"last_move,omitempty"`
+	ID           string          `json:"id"`
+	Seed         int64           `json:"seed"`
+	Winner       int             `json:"winner"`
+	Turns        int             `json:"turns"`
+	Truncated    bool            `json:"truncated"`
+	Error        string          `json:"error,omitempty"`
+	Snakes       []SnakeMetrics  `json:"snakes"`
+	Frames       []GameState     `json:"frames,omitempty"`
+	Decisions    []ArenaDecision `json:"decisions,omitempty"`
+	LastDecision *GameState      `json:"last_decision,omitempty"`
+	LastMove     string          `json:"last_move,omitempty"`
 }
 
 func (s ArenaSettings) validate() error {
@@ -235,11 +245,18 @@ func simulateGame(ctx context.Context, settings ArenaSettings, job ArenaJob) (re
 				move, err = safePolicyContext(ctx, start, state, job.Snakes[i])
 			}
 			elapsed := float64(time.Since(start).Nanoseconds()) / 1e6
+			decision := ArenaDecision{Turn: board.Turn, Seat: i, ElapsedMS: elapsed, ResponseMove: move, Timeout: elapsed > float64(settings.TimeoutMS)}
+			if err != nil {
+				decision.Error = err.Error()
+			}
 			metrics := &result.Snakes[i]
 			metrics.Moves++
 			metrics.MaxMS = max(metrics.MaxMS, elapsed)
 			latencies[i] = append(latencies[i], elapsed)
 			valid := slices.Contains([]string{"up", "down", "left", "right"}, move)
+			if err == nil && !valid {
+				decision.Error = "invalid move response"
+			}
 			if elapsed > float64(settings.TimeoutMS) {
 				metrics.Timeouts++
 				move = previous[i]
@@ -249,6 +266,10 @@ func simulateGame(ctx context.Context, settings ArenaSettings, job ArenaJob) (re
 			}
 			if move == "" {
 				move = arenaDefaultMove(snake)
+			}
+			if job.Trace {
+				decision.Move = move
+				result.Decisions = append(result.Decisions, decision)
 			}
 			previous[i] = move
 			moves = append(moves, rules.SnakeMove{ID: snake.ID, Move: move})

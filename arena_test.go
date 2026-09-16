@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestArenaDeterminismAndTruncation(t *testing.T) {
@@ -65,12 +66,46 @@ func TestArenaHTTPMatchesInProcess(t *testing.T) {
 			t.Fatalf("unexpected fault: %+v", metrics)
 		}
 	}
+	var recorded [4]int
+	for _, decision := range remote.Decisions {
+		if decision.Turn < 0 || decision.Turn >= remote.Turns || decision.Seat < 0 || decision.Seat >= len(recorded) || decision.ElapsedMS < 0 || decision.Timeout || decision.Error != "" || decision.Move == "" || decision.ResponseMove != decision.Move {
+			t.Fatalf("invalid decision trace: %+v", decision)
+		}
+		recorded[decision.Seat]++
+	}
+	for seat, metrics := range remote.Snakes {
+		if recorded[seat] != metrics.Moves {
+			t.Fatalf("seat %d trace has %d moves, want %d", seat, recorded[seat], metrics.Moves)
+		}
+	}
 	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) }))
 	defer bad.Close()
 	job.Snakes[0].URL = bad.URL
 	broken := simulateGame(context.Background(), settings, job)
 	if broken.Snakes[0].Errors == 0 {
 		t.Fatal("failed HTTP opponent was silently accepted")
+	}
+	if len(broken.Decisions) == 0 || broken.Decisions[0].Error == "" || broken.Decisions[0].Move == "" || broken.Decisions[0].ResponseMove != "" {
+		t.Fatal("failed response and applied fallback were not retained")
+	}
+	job.Trace = false
+	if quiet := simulateGame(context.Background(), settings, job); len(quiet.Decisions) != 0 {
+		t.Fatal("non-trace games retained per-turn diagnostics")
+	}
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/move" {
+			time.Sleep(25 * time.Millisecond)
+			return
+		}
+		_, _ = fmt.Fprint(w, `{}`)
+	}))
+	defer slow.Close()
+	job.Trace, job.Snakes[0].URL = true, slow.URL
+	settings.TimeoutMS, settings.MaxTurns = 10, 1
+	timed := simulateGame(context.Background(), settings, job)
+	first := timed.Decisions[0]
+	if timed.Snakes[0].Timeouts+timed.Snakes[0].Errors != 1 || first.Timeout != (timed.Snakes[0].Timeouts == 1) || first.Error == "" || first.ResponseMove != "" || first.Move == "" {
+		t.Fatalf("timeout response and fallback differ from aggregate: %+v / %+v", first, timed.Snakes[0])
 	}
 }
 

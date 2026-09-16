@@ -131,6 +131,9 @@ func TestPolicyValidation(t *testing.T) {
 		func(p *Policy) { p.TrapPenalty = 100001 },
 		func(p *Policy) { p.SuccessorBudgetMS = -1 },
 		func(p *Policy) { p.SuccessorBudgetMS = 201 },
+		func(p *Policy) { p.SurvivalDepth = -1 },
+		func(p *Policy) { p.SurvivalDepth = 1 },
+		func(p *Policy) { p.SurvivalDepth = 6 },
 	} {
 		p := valid
 		change(&p)
