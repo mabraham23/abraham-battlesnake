@@ -4,7 +4,7 @@
   "hunger_threshold": 45,
   "kind": "heuristic",
   "lookahead": true,
-  "name": "paranoid",
+  "name": "paranoid-v2",
   "space_weight": 10,
   "successor_lookahead": true,
   "tail_weight": 50,
@@ -12,5 +12,10 @@
   "trap_penalty": 3000,
   "search_depth": 4,
   "search_budget_ms": 100,
-  "search_food_weight": 60
+  "search_food_weight": 60,
+  "search_depth_duel": 6,
+  "search_length_weight": 80,
+  "search_budget_duel_ms": 150,
+  "search_edge_penalty": 40,
+  "search_choke_weight": 1500
 }

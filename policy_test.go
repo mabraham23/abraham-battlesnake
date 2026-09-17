@@ -176,6 +176,11 @@ func TestPolicyValidation(t *testing.T) {
 		func(p *Policy) { p.SearchDepth = 7 },
 		func(p *Policy) { p.SearchBudgetMS = 301 },
 		func(p *Policy) { p.SearchWeight = -1 },
+		func(p *Policy) { p.SearchDepthDuel = 4 },
+		func(p *Policy) { p.SearchDepth = 4; p.SearchDepthDuel = 9 },
+		func(p *Policy) { p.SearchLengthWeight = 1001 },
+		func(p *Policy) { p.SearchBudgetDuelMS = 301 },
+		func(p *Policy) { p.SearchEdgePenalty = 10001 },
 	} {
 		p := valid
 		change(&p)

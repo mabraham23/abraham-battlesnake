@@ -28,6 +28,9 @@ func policySearchValues(state GameState, candidates []policyCandidate, safe map[
 		return nil
 	}
 	timeoutMS := p.SearchBudgetMS
+	if p.SearchBudgetDuelMS > 0 && policyAliveSnakes(state) == 2 {
+		timeoutMS = p.SearchBudgetDuelMS
+	}
 	if timeoutMS <= 0 {
 		timeoutMS = searchDefaultBudgetMS
 	}
@@ -46,8 +49,13 @@ func policySearchValues(state GameState, candidates []policyCandidate, safe map[
 		}
 	}
 	search := newParanoidSearch(state, board, budget, p)
+	depth := p.SearchDepth
+	if p.SearchDepthDuel > 0 && len(board.Snakes) == 2 {
+		// Two-snake branching is small enough for a deeper horizon within the same node cap and deadline.
+		depth = p.SearchDepthDuel
+	}
 	var completed map[string]float64
-	for horizon := 2; horizon <= p.SearchDepth; horizon++ {
+	for horizon := 2; horizon <= depth; horizon++ {
 		current := make(map[string]float64, len(choices))
 		for _, move := range choices {
 			value := search.maxNode(board, horizon, 0, move, math.Inf(-1), math.Inf(1))
@@ -71,6 +79,12 @@ type paranoidSearch struct {
 	spaceWeight     float64
 	territoryWeight float64
 	foodWeight      float64
+	lengthWeight    float64
+	edgePenalty     float64
+	chokeWeight     float64
+	maxNodes        int
+	duelBranching   bool
+	earlyGrowth     bool
 	hunger          int
 	opponents       int
 	nodes           int
@@ -90,8 +104,8 @@ func newParanoidSearch(state GameState, board *rules.BoardState, budget *moveBud
 	s := &paranoidSearch{
 		budget: budget, you: state.You.ID, solo: state.Game.Ruleset.Name == "solo" || len(board.Snakes) == 1,
 		width: board.Width, height: board.Height, spaceWeight: p.SpaceWeight, territoryWeight: p.TerritoryWeight,
-		foodWeight: p.SearchFoodWeight, hunger: int(p.HungerThreshold),
-		opponents: len(board.Snakes) - 1,
+		foodWeight: p.SearchFoodWeight, lengthWeight: 50, earlyGrowth: p.SearchLengthWeight > 0, hunger: int(p.HungerThreshold),
+		opponents: len(board.Snakes) - 1, edgePenalty: p.SearchEdgePenalty, chokeWeight: p.SearchChokeWeight, maxNodes: searchMaxNodes, duelBranching: p.SearchBudgetDuelMS > 0 && len(board.Snakes) == 2,
 		ruleset: rules.NewRulesetBuilder().WithSolo(true).WithParams(map[string]string{
 			rules.ParamFoodSpawnChance: "0", rules.ParamMinimumFood: "0",
 			rules.ParamHazardDamagePerTurn: strconv.Itoa(state.Game.Ruleset.Settings.HazardDamagePerTurn),
@@ -99,6 +113,12 @@ func newParanoidSearch(state GameState, board *rules.BoardState, budget *moveBud
 		hazard: make([]bool, cells), food: make([]bool, cells), occupied: make([]bool, cells),
 		release: make([]int32, cells), ours: make([]int32, cells), theirs: make([]int32, cells), theirLen: make([]int32, cells),
 		queue: make([]int32, 0, cells),
+	}
+	if p.SearchLengthWeight > 0 {
+		s.lengthWeight = p.SearchLengthWeight
+	}
+	if p.SearchNodes > 0 {
+		s.maxNodes = p.SearchNodes
 	}
 	for _, cell := range board.Hazards {
 		if s.inside(cell) {
@@ -117,7 +137,7 @@ func (s *paranoidSearch) index(cell rules.Point) int {
 }
 
 func (s *paranoidSearch) maxNode(board *rules.BoardState, remaining, ply int, forced string, alpha, beta float64) float64 {
-	if s.aborted || s.nodes >= searchMaxNodes || s.budget.stopped() {
+	if s.aborted || s.nodes >= s.maxNodes || s.budget.stopped() {
 		s.aborted = true
 		return 0
 	}
@@ -253,7 +273,7 @@ func (s *paranoidSearch) legalMoves(snake rules.Snake, out *[4]string) int {
 
 func (s *paranoidSearch) opponentMoves(snake rules.Snake, ourHead rules.Point, remaining int, out *[4]string) int {
 	head := snake.Body[0]
-	if abs(head.X-ourHead.X)+abs(head.Y-ourHead.Y) > 2*remaining+1 {
+	if !s.duelBranching && abs(head.X-ourHead.X)+abs(head.Y-ourHead.Y) > 2*remaining+1 {
 		// Distant opponents cannot interact within the horizon; they continue straight when possible.
 		if len(snake.Body) > 1 && snake.Body[1] != head {
 			straight := rules.Point{X: 2*head.X - snake.Body[1].X, Y: 2*head.Y - snake.Body[1].Y}
@@ -370,15 +390,96 @@ func (s *paranoidSearch) evaluate(board *rules.BoardState, live []rules.Snake, u
 			territory++
 		}
 	}
-	score += s.spaceWeight*float64(min(space, 2*len(me.Body))) + s.territoryWeight*float64(territory) + 50*float64(len(me.Body)-maxOpponent)
+	score += s.spaceWeight*float64(min(space, 2*len(me.Body))) + s.territoryWeight*float64(territory) + s.lengthWeight*float64(len(me.Body)-maxOpponent)
+	if s.chokeWeight > 0 {
+		score -= s.chokePenalty(live, us, territory)
+	}
 	if me.Health < 30 && (foodDistance < 0 || int(foodDistance) > me.Health) {
 		score -= 100
 	}
+	if s.edgePenalty > 0 {
+		// Opponents herd us along walls; penalise the edge fully and the next ring by half.
+		x, y := me.Body[0].X, me.Body[0].Y
+		if x == 0 || y == 0 || x == s.width-1 || y == s.height-1 {
+			score -= s.edgePenalty
+		} else if x == 1 || y == 1 || x == s.width-2 || y == s.height-2 {
+			score -= s.edgePenalty / 2
+		}
+	}
 	// Eat when hungry or not the longest snake; head contests are decided by length.
-	if s.foodWeight > 0 && foodDistance >= 0 && (me.Health <= s.hunger+20 || len(me.Body) <= maxOpponent) {
+	if s.foodWeight > 0 && foodDistance >= 0 && (me.Health <= s.hunger+20 || len(me.Body) <= maxOpponent || s.earlyGrowth && len(me.Body) < 8) {
 		score += s.foodWeight / float64(foodDistance+1)
 	}
 	return score
+}
+
+// Our territory touching the opponent's along at most two cells is a region the opponent can seal
+// beyond the search horizon; penalise it when it is too small to outlive the seal.
+func (s *paranoidSearch) chokePenalty(live []rules.Snake, us, territory int) float64 {
+	length := int32(len(live[us].Body))
+	if territory >= 2*int(length) || len(live) < 2 {
+		return 0
+	}
+	oppHead := int32(-1)
+	if len(live) == 2 {
+		oppHead = int32(s.index(live[1-us].Body[0]))
+	}
+	oursCell := func(cell int32) bool {
+		distance := s.ours[cell]
+		if distance < 0 {
+			return false
+		}
+		theirs := s.theirs[cell]
+		return theirs < 0 || distance < theirs || distance == theirs && length > s.theirLen[cell]
+	}
+	frontier := 0
+	// A region nobody can reach is sealed shut, not sealable; the space term already prices it.
+	opponentAdjacent := false
+	for cell := range s.ours {
+		if !oursCell(int32(cell)) {
+			continue
+		}
+		for _, next := range s.neighbors(int32(cell)) {
+			if next < 0 {
+				continue
+			}
+			if s.theirs[next] >= 0 {
+				opponentAdjacent = true
+			}
+			// A frontier cell is currently free, opponent-reachable and not ours-first (ties count: they can take it).
+			contested := s.release[next] == 0 && s.theirs[next] >= 0 && !oursCell(next)
+			if !contested && oppHead >= 0 {
+				for _, around := range s.neighbors(oppHead) {
+					if around == next {
+						contested = true
+						break
+					}
+				}
+			}
+			if contested {
+				frontier++
+				break
+			}
+		}
+	}
+	if frontier > 2 || !opponentAdjacent {
+		return 0
+	}
+	penalty := s.chokeWeight * (1 + float64(2*int(length)-territory)/float64(2*length))
+	if frontier <= 1 && territory < int(length) {
+		penalty *= 2
+	}
+	return penalty
+}
+
+func policyAliveSnakes(state GameState) int {
+	alive := 0
+	for _, snake := range state.Board.Snakes {
+		if len(snake.Body) > 0 {
+			alive++
+		}
+	}
+	return alive
 }
 
 func (s *paranoidSearch) neighbors(cell int32) [4]int32 {

@@ -19,7 +19,7 @@ func handlerWithPolicy(policy Policy) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, BattlesnakeInfoResponse{
-			APIVersion: "1", Author: "mabraham23", Color: "#B91C1C", Head: "evil", Tail: "sharp",
+			APIVersion: "1", Author: "mabraham23", Color: envOr("SNAKE_COLOR", "#B91C1C"), Head: envOr("SNAKE_HEAD", "evil"), Tail: envOr("SNAKE_TAIL", "sharp"),
 		})
 	})
 	debug := os.Getenv("DEBUG_MOVES") == "1"
@@ -88,4 +88,11 @@ func validMoveState(state GameState) bool {
 		}
 	}
 	return true
+}
+
+func envOr(key, fallback string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return fallback
 }

@@ -35,6 +35,12 @@ type Policy struct {
 	SearchBudgetMS     int     `json:"search_budget_ms,omitempty"`
 	SearchWeight       float64 `json:"search_weight,omitempty"`
 	SearchFoodWeight   float64 `json:"search_food_weight,omitempty"`
+	SearchDepthDuel    int     `json:"search_depth_duel,omitempty"`
+	SearchLengthWeight float64 `json:"search_length_weight,omitempty"`
+	SearchBudgetDuelMS int     `json:"search_budget_duel_ms,omitempty"`
+	SearchEdgePenalty  float64 `json:"search_edge_penalty,omitempty"`
+	SearchChokeWeight  float64 `json:"search_choke_weight,omitempty"`
+	SearchNodes        int     `json:"search_nodes,omitempty"`
 }
 
 func defaultPolicies() []Policy {
@@ -75,8 +81,26 @@ func validatePolicy(p Policy) error {
 	if p.SearchDepth != 0 && (p.SearchDepth < 2 || p.SearchDepth > 6) {
 		return fmt.Errorf("policy %q search depth must be zero or between two and six turns", p.Name)
 	}
+	if p.SearchDepthDuel != 0 && (p.SearchDepthDuel < 2 || p.SearchDepthDuel > 8 || p.SearchDepth == 0) {
+		return fmt.Errorf("policy %q duel search depth requires search depth and two to eight turns", p.Name)
+	}
+	if math.IsNaN(p.SearchLengthWeight) || math.IsInf(p.SearchLengthWeight, 0) || p.SearchLengthWeight < 0 || p.SearchLengthWeight > 1000 {
+		return fmt.Errorf("policy %q search length weight must be between 0 and 1000", p.Name)
+	}
+	if p.SearchNodes < 0 || p.SearchNodes > 200000 {
+		return fmt.Errorf("policy %q search nodes must be between 0 and 200000", p.Name)
+	}
 	if p.SearchBudgetMS < 0 || p.SearchBudgetMS > searchMaxBudgetMS {
 		return fmt.Errorf("policy %q search budget must be between 0 and %d milliseconds", p.Name, searchMaxBudgetMS)
+	}
+	if p.SearchBudgetDuelMS < 0 || p.SearchBudgetDuelMS > searchMaxBudgetMS {
+		return fmt.Errorf("policy %q duel search budget must be between 0 and %d milliseconds", p.Name, searchMaxBudgetMS)
+	}
+	if math.IsNaN(p.SearchEdgePenalty) || math.IsInf(p.SearchEdgePenalty, 0) || p.SearchEdgePenalty < 0 || p.SearchEdgePenalty > 10000 {
+		return fmt.Errorf("policy %q search edge penalty must be between 0 and 10000", p.Name)
+	}
+	if math.IsNaN(p.SearchChokeWeight) || math.IsInf(p.SearchChokeWeight, 0) || p.SearchChokeWeight < 0 || p.SearchChokeWeight > 100000 {
+		return fmt.Errorf("policy %q search choke weight must be between 0 and 100000", p.Name)
 	}
 	return nil
 }
