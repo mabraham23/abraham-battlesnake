@@ -1,8 +1,17 @@
-# Abraham Successor
+# Abraham Paranoid v2
 
-A Go Battlesnake for early Summit 2026 practice games. The selected `successor` policy uses
-collision checks, flood fill, food search, territory estimates and bounded successor-board
-lookahead. This is a provisional trial build, not a statistically confirmed tournament winner.
+A Go Battlesnake for Summit 2026. It serves the `paranoid-v2` policy from `policy.json`: the
+`successor` heuristic (collision checks, release-aware flood fill, food search, territory estimate,
+one-turn successor lookahead) reranked by a paranoid minimax search (iterative deepening,
+alpha-beta, opponents jointly minimise our leaf score). Standard games search four turns within
+100 ms; two-snake games search six turns within 150 ms with full opponent branching, an edge
+penalty and a chokepoint penalty for regions the opponent can seal beyond the horizon. Exact
+one-turn head-to-head safety filters still gate every move. The search stops at the request
+deadline and only compares moves at a horizon completed for every alternative; heuristic
+pruning is not a survival proof.
+
+Appearance: `#B91C1C`, head `evil`, tail `sharp` (override with `SNAKE_COLOR`, `SNAKE_HEAD`,
+`SNAKE_TAIL`).
 
 ## Run
 
@@ -28,10 +37,11 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false -o bin/
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -buildvcs=false -o bin/abraham-linux-arm64 .
 ```
 
-The native trial build passed API lifecycle checks and 45 fixture moves at 100, 250 and
-500 ms advertised timeouts, with a maximum local response of 13.82 ms. Hosted latency
-must be checked separately. The initial exploratory screen recorded 19 wins in 48 games;
-the broader comparison is still in progress, so this does not establish general superiority.
+Local paired evaluation against the frozen `successor` build on identical seeds (96 games per
+suite): 0.80 vs 0.39 points in-family, 0.67 vs 0.30 with independent opponents, 0.73 vs 0.37 in
+two-snake duels; zero faults, maximum local response 152 ms. The previous release (`paranoid`,
+four-turn search only, winner of the Summit 2026 Thursday Morning Throwdown) scored 0.74 and 0.55
+on the same seeds. Hosted latency must be checked separately for every deployment.
 
 ## Source and licenses
 
