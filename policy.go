@@ -11,6 +11,8 @@ import (
 	"github.com/BattlesnakeOfficial/rules"
 )
 
+const maxLookaheadSnakes = 5
+
 type Policy struct {
 	Name               string  `json:"name"`
 	Kind               string  `json:"kind"`
@@ -25,6 +27,10 @@ type Policy struct {
 	Lookahead          bool    `json:"lookahead"`
 	SuccessorLookahead bool    `json:"successor_lookahead,omitempty"`
 	SuccessorBudgetMS  int     `json:"successor_budget_ms,omitempty"`
+	MobilityWeight     float64 `json:"mobility_weight,omitempty"`
+	SurvivalDepth      int     `json:"survival_depth,omitempty"`
+	EscapeDepth        int     `json:"escape_depth,omitempty"`
+	UncappedTerritory  bool    `json:"uncapped_territory,omitempty"`
 }
 
 func defaultPolicies() []Policy {
@@ -45,7 +51,7 @@ func validatePolicy(p Policy) error {
 	if p.Kind != "baseline" && p.Kind != "heuristic" {
 		return fmt.Errorf("policy %q kind must be baseline or heuristic", p.Name)
 	}
-	for _, value := range []float64{p.SpaceWeight, p.FoodWeight, p.TerritoryWeight, p.TailWeight, p.HeadRisk, p.TrapPenalty} {
+	for _, value := range []float64{p.SpaceWeight, p.FoodWeight, p.TerritoryWeight, p.TailWeight, p.HeadRisk, p.TrapPenalty, p.MobilityWeight} {
 		if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || value > 100000 {
 			return fmt.Errorf("policy %q weights must be finite and between 0 and 100000", p.Name)
 		}
@@ -55,6 +61,12 @@ func validatePolicy(p Policy) error {
 	}
 	if p.SuccessorBudgetMS < 0 || p.SuccessorBudgetMS > 200 {
 		return fmt.Errorf("policy %q successor budget must be between 0 and 200 milliseconds", p.Name)
+	}
+	if p.SurvivalDepth != 0 && (p.SurvivalDepth < 2 || p.SurvivalDepth > 5) {
+		return fmt.Errorf("policy %q survival depth must be zero or between two and five turns", p.Name)
+	}
+	if p.EscapeDepth != 0 && (p.EscapeDepth < 8 || p.EscapeDepth > 32 || !p.SuccessorLookahead) {
+		return fmt.Errorf("policy %q escape depth requires successor lookahead and eight to 32 turns", p.Name)
 	}
 	return nil
 }
@@ -115,7 +127,7 @@ func selectMoveContext(ctx context.Context, arrived time.Time, state GameState, 
 		blocked[cell] = true
 	}
 	var safe map[string]bool
-	if p.Lookahead || p.SuccessorLookahead {
+	if p.Lookahead || p.SuccessorLookahead || p.SurvivalDepth > 0 {
 		safe = policySafeMovesWithBudget(state, budget)
 		for _, dir := range directions {
 			if safe[dir.name] {
@@ -198,7 +210,11 @@ candidateLoop:
 		if budget.stopped() {
 			break
 		}
-		score := float64(min(space, len(body)*2))*p.SpaceWeight + float64(min(territory, len(body)*2))*p.TerritoryWeight
+		controlled := min(territory, len(body)*2)
+		if p.UncappedTerritory {
+			controlled = territory
+		}
+		score := float64(min(space, len(body)*2))*p.SpaceWeight + float64(controlled)*p.TerritoryWeight
 		if space < len(body) {
 			score -= p.TrapPenalty * (1 + float64(len(body)-space)/float64(len(body)))
 		}
@@ -232,9 +248,20 @@ candidateLoop:
 		candidates = append(candidates, policyCandidate{dir.name, score})
 	}
 	if p.SuccessorLookahead && !budget.stopped() {
-		penalties := policySuccessorPenalties(state, candidates, safe, budget, p.SuccessorBudgetMS)
+		penalties := policySuccessorPenalties(state, candidates, safe, budget, p)
 		for i := range candidates {
-			candidates[i].score -= p.TrapPenalty * penalties[candidates[i].move]
+			candidates[i].score -= penalties[candidates[i].move]
+		}
+	}
+	var survival map[string]bool
+	if p.SurvivalDepth > 0 && !budget.stopped() {
+		survival = policySurvivalMoves(state, candidates, safe, budget, p.SurvivalDepth)
+	}
+	preferSurvival := false
+	for _, candidate := range candidates {
+		if survival[candidate.move] {
+			preferSurvival = true
+			fallback = candidate.move
 		}
 	}
 	stopped := budget.stopped()
@@ -254,6 +281,9 @@ candidateLoop:
 	}
 	for _, candidate := range candidates {
 		if preferSafe && !safe[candidate.move] {
+			continue
+		}
+		if preferSurvival && !survival[candidate.move] {
 			continue
 		}
 		if candidate.score > bestScore {
@@ -372,8 +402,8 @@ func policySafeDirectionsWithBudget(state GameState, budget *moveBudget, choices
 	if state.Game.Ruleset.Name != "" && state.Game.Ruleset.Name != "standard" && state.Game.Ruleset.Name != "solo" {
 		return nil
 	}
-	// Four directions against at most three opponents bounds this filter to 256 one-turn transitions.
-	if len(state.Board.Snakes) > 4 || len(state.Board.Snakes) == 0 || budget.stopped() {
+	// Five snakes bound the filter to 1,024 one-turn transitions, with the request deadline still enforced.
+	if len(state.Board.Snakes) > maxLookaheadSnakes || len(state.Board.Snakes) == 0 || budget.stopped() {
 		return nil
 	}
 	board := policyRulesBoardWithBudget(state, budget)

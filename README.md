@@ -1,8 +1,9 @@
-# Abraham Successor
+# Abraham territory trial
 
-A Go Battlesnake for early Summit 2026 practice games. The selected `successor` policy uses
-collision checks, flood fill, food search, territory estimates and bounded successor-board
-lookahead. This is a provisional trial build, not a statistically confirmed tournament winner.
+Frozen candidate **day-04-1** keeps collision checks, bounded successor lookahead and
+food search, and preserves differences in estimated territory instead of capping them.
+The reachable-space cap remains. Optional survival and route-search features in the source
+are disabled in this candidate's policy.
 
 ## Run
 
@@ -11,11 +12,21 @@ sh start.sh
 ```
 
 The included frozen binaries support Linux amd64/arm64 and macOS arm64. The server listens
-on `0.0.0.0:8000`; override `HOST` or `PORT` when needed. It loads `policy.json` through
-`SNAKE_CONFIG`. GET `/` and POST `/start`, `/move`, `/end` implement the Battlesnake API.
+on `0.0.0.0:8000`; override `HOST` or `PORT` when needed. `SNAKE_CONFIG` loads `policy.json`.
+GET `/` and POST `/start`, `/move`, and `/end` implement the Battlesnake API.
 
-For Replit, import this repository or the release ZIP and use `sh start.sh`. The `.replit`
-file maps internal port 8000 to external port 80. Verify the live endpoint before games.
+## Evaluation status
+
+The exploratory screen recorded 17/36 wins versus the original's 15/36. A fresh, harder
+challenge recorded 14/40 versus 10/40, with zero protocol faults or turn caps. Self/wall
+losses fell from 15 to 7 in that challenge, but head losses increased and two lineups
+regressed. These local results do not establish tournament or hosted superiority.
+Independent validation and a hosted comparison remain in progress; this is a reversible
+trial, not an accepted replacement.
+
+The frozen source passed Go race tests and vet. The packaged native start script passed
+metadata, lifecycle and 45 move checks at 100/250/500 ms deadlines, maximum 16.02 ms.
+Linux binaries are cross-compiled; live runtime and latency require separate verification.
 
 ## Rebuild and verify
 
@@ -27,11 +38,6 @@ go vet ./...
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false -o bin/abraham-linux-amd64 .
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -buildvcs=false -o bin/abraham-linux-arm64 .
 ```
-
-The native trial build passed API lifecycle checks and 45 fixture moves at 100, 250 and
-500 ms advertised timeouts, with a maximum local response of 13.82 ms. Hosted latency
-must be checked separately. The initial exploratory screen recorded 19 wins in 48 games;
-the broader comparison is still in progress, so this does not establish general superiority.
 
 ## Source and licenses
 

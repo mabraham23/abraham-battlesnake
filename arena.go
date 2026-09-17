@@ -39,9 +39,10 @@ type ArenaJob struct {
 	Trace  bool     `json:"trace,omitempty"`
 }
 type ArenaBatch struct {
-	Settings ArenaSettings `json:"settings"`
-	Workers  int           `json:"workers"`
-	Games    []ArenaJob    `json:"games"`
+	Settings        ArenaSettings `json:"settings"`
+	Workers         int           `json:"workers"`
+	Games           []ArenaJob    `json:"games"`
+	ConcurrentMoves bool          `json:"concurrent_moves,omitempty"`
 }
 type SnakeMetrics struct {
 	Name           string  `json:"name"`
@@ -54,17 +55,27 @@ type SnakeMetrics struct {
 	Eliminated     string  `json:"eliminated"`
 	EliminatedTurn int     `json:"eliminated_turn"`
 }
+type ArenaDecision struct {
+	Turn         int     `json:"turn"`
+	Seat         int     `json:"seat"`
+	ElapsedMS    float64 `json:"elapsed_ms"`
+	ResponseMove string  `json:"response_move"`
+	Move         string  `json:"move"`
+	Timeout      bool    `json:"timeout"`
+	Error        string  `json:"error,omitempty"`
+}
 type ArenaResult struct {
-	ID           string         `json:"id"`
-	Seed         int64          `json:"seed"`
-	Winner       int            `json:"winner"`
-	Turns        int            `json:"turns"`
-	Truncated    bool           `json:"truncated"`
-	Error        string         `json:"error,omitempty"`
-	Snakes       []SnakeMetrics `json:"snakes"`
-	Frames       []GameState    `json:"frames,omitempty"`
-	LastDecision *GameState     `json:"last_decision,omitempty"`
-	LastMove     string         `json:"last_move,omitempty"`
+	ID           string          `json:"id"`
+	Seed         int64           `json:"seed"`
+	Winner       int             `json:"winner"`
+	Turns        int             `json:"turns"`
+	Truncated    bool            `json:"truncated"`
+	Error        string          `json:"error,omitempty"`
+	Snakes       []SnakeMetrics  `json:"snakes"`
+	Frames       []GameState     `json:"frames,omitempty"`
+	Decisions    []ArenaDecision `json:"decisions,omitempty"`
+	LastDecision *GameState      `json:"last_decision,omitempty"`
+	LastMove     string          `json:"last_move,omitempty"`
 }
 
 func (s ArenaSettings) validate() error {
@@ -112,7 +123,7 @@ func runArena(ctx context.Context, input io.Reader, output io.Writer) error {
 		go func() {
 			defer wg.Done()
 			for job := range jobs {
-				results <- simulateGame(ctx, batch.Settings, job)
+				results <- simulateGame(ctx, batch.Settings, job, batch.ConcurrentMoves)
 			}
 		}()
 	}
@@ -136,7 +147,7 @@ func runArena(ctx context.Context, input io.Reader, output io.Writer) error {
 	return ctx.Err()
 }
 
-func simulateGame(ctx context.Context, settings ArenaSettings, job ArenaJob) (result ArenaResult) {
+func simulateGame(ctx context.Context, settings ArenaSettings, job ArenaJob, concurrentMoves bool) (result ArenaResult) {
 	result = ArenaResult{ID: job.ID, Seed: job.Seed, Winner: -1}
 	defer func() {
 		if r := recover(); r != nil {
@@ -221,39 +232,74 @@ func simulateGame(ctx context.Context, settings ArenaSettings, job ArenaJob) (re
 		if job.Trace {
 			result.Frames = append(result.Frames, arenaState(board, settings, job, job.Focus))
 		}
+		states := make([]GameState, len(ids))
+		decisions := make([]ArenaDecision, len(ids))
+		requestMove := func(i int) {
+			start := time.Now()
+			var move string
+			var err error
+			if clients[i] != nil {
+				move, err = callSnake(ctx, clients[i], job.Snakes[i].URL, "move", states[i])
+			} else {
+				move, err = safePolicyContext(ctx, start, states[i], job.Snakes[i])
+			}
+			elapsed := float64(time.Since(start).Nanoseconds()) / 1e6
+			decision := ArenaDecision{Turn: board.Turn, Seat: i, ElapsedMS: elapsed, ResponseMove: move, Timeout: elapsed > float64(settings.TimeoutMS)}
+			if err != nil {
+				decision.Error = err.Error()
+			}
+			decisions[i] = decision
+		}
+		var requests sync.WaitGroup
+		for i, snake := range board.Snakes {
+			if snake.EliminatedCause != rules.NotEliminated {
+				continue
+			}
+			states[i] = arenaState(board, settings, job, i)
+			if concurrentMoves && clients[i] != nil {
+				requests.Add(1)
+				go func(i int) {
+					defer requests.Done()
+					requestMove(i)
+				}(i)
+			} else {
+				requestMove(i)
+			}
+		}
+		requests.Wait()
 		moves := make([]rules.SnakeMove, 0, len(ids))
 		for i, snake := range board.Snakes {
 			if snake.EliminatedCause != rules.NotEliminated {
 				continue
 			}
-			state := arenaState(board, settings, job, i)
-			start := time.Now()
-			var move string
-			if clients[i] != nil {
-				move, err = callSnake(ctx, clients[i], job.Snakes[i].URL, "move", state)
-			} else {
-				move, err = safePolicyContext(ctx, start, state, job.Snakes[i])
-			}
-			elapsed := float64(time.Since(start).Nanoseconds()) / 1e6
+			decision := decisions[i]
+			move, elapsed := decision.ResponseMove, decision.ElapsedMS
 			metrics := &result.Snakes[i]
 			metrics.Moves++
 			metrics.MaxMS = max(metrics.MaxMS, elapsed)
 			latencies[i] = append(latencies[i], elapsed)
 			valid := slices.Contains([]string{"up", "down", "left", "right"}, move)
+			if decision.Error == "" && !valid {
+				decision.Error = "invalid move response"
+			}
 			if elapsed > float64(settings.TimeoutMS) {
 				metrics.Timeouts++
 				move = previous[i]
-			} else if err != nil || !valid {
+			} else if decision.Error != "" || !valid {
 				metrics.Errors++
 				move = previous[i]
 			}
 			if move == "" {
 				move = arenaDefaultMove(snake)
 			}
+			if job.Trace {
+				decision.Move = move
+				result.Decisions = append(result.Decisions, decision)
+			}
 			previous[i] = move
 			moves = append(moves, rules.SnakeMove{ID: snake.ID, Move: move})
 			if i == job.Focus {
-				result.LastDecision = &state
+				result.LastDecision = &states[i]
 				result.LastMove = move
 			}
 		}

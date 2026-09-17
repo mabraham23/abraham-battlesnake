@@ -7,7 +7,30 @@ import (
 	"github.com/BattlesnakeOfficial/rules"
 )
 
-func policySuccessorPenalties(state GameState, candidates []policyCandidate, safe map[string]bool, requestBudget *moveBudget, timeoutMS int) map[string]float64 {
+func policySuccessorPenalties(state GameState, candidates []policyCandidate, safe map[string]bool, requestBudget *moveBudget, policy Policy) map[string]float64 {
+	basePolicy := policy
+	basePolicy.EscapeDepth = 0
+	penalties := policySuccessorPenaltyPass(state, candidates, safe, requestBudget, basePolicy)
+	choices := 0
+	for _, candidate := range candidates {
+		if safe[candidate.move] {
+			choices++
+		}
+	}
+	if policy.EscapeDepth > 0 && choices > 1 && !requestBudget.stopped() {
+		routes := policySuccessorPenaltyPass(state, candidates, safe, requestBudget, policy)
+		if penalties == nil {
+			penalties = make(map[string]float64)
+		}
+		for move, cost := range routes {
+			penalties[move] = max(penalties[move], cost)
+		}
+	}
+	return penalties
+}
+
+func policySuccessorPenaltyPass(state GameState, candidates []policyCandidate, safe map[string]bool, requestBudget *moveBudget, policy Policy) map[string]float64 {
+	timeoutMS := policy.SuccessorBudgetMS
 	if timeoutMS <= 0 {
 		timeoutMS = 50
 	}
@@ -17,7 +40,7 @@ func policySuccessorPenalties(state GameState, candidates []policyCandidate, saf
 	}
 	budget := &moveBudget{ctx: requestBudget.ctx, deadline: deadline}
 	board := policyRulesBoardWithBudget(state, budget)
-	if board == nil || len(board.Snakes) == 0 || len(board.Snakes) > 4 {
+	if board == nil || len(board.Snakes) == 0 || len(board.Snakes) > maxLookaheadSnakes {
 		return nil
 	}
 	ruleset := rules.NewRulesetBuilder().WithSolo(true).WithParams(map[string]string{
@@ -53,8 +76,15 @@ func policySuccessorPenalties(state GameState, candidates []policyCandidate, saf
 				if len(successor.Board.Snakes) == 1 && len(state.Board.Snakes) > 1 && state.Game.Ruleset.Name != "solo" {
 					return true
 				}
-				penalty, complete := policySuccessorEscape(successor, budget)
-				worstPenalty = max(worstPenalty, penalty)
+				var penalty float64
+				exits, complete := 3, false
+				if policy.EscapeDepth > 0 {
+					penalty, complete = policyRouteEscape(successor, budget, policy.EscapeDepth)
+				} else {
+					penalty, exits, complete = policySuccessorEscape(successor, budget, policy.MobilityWeight > 0)
+				}
+				cost := policy.TrapPenalty*penalty + policy.MobilityWeight*float64(max(0, 3-exits))
+				worstPenalty = max(worstPenalty, cost)
 				return complete
 			}
 			if moves[index].ID == state.You.ID {
@@ -79,17 +109,17 @@ func policySuccessorPenalties(state GameState, candidates []policyCandidate, saf
 	return penalties
 }
 
-func policySuccessorEscape(state GameState, budget *moveBudget) (float64, bool) {
+func policySuccessorEscape(state GameState, budget *moveBudget, countExits bool) (float64, int, bool) {
 	food, hazards := make(map[Coord]bool), make(map[Coord]int)
 	for i, cell := range state.Board.Food {
 		if i%32 == 0 && budget.stopped() {
-			return 0, false
+			return 0, 0, false
 		}
 		food[cell] = true
 	}
 	for i, cell := range state.Board.Hazards {
 		if i%32 == 0 && budget.stopped() {
-			return 0, false
+			return 0, 0, false
 		}
 		hazards[cell]++
 	}
@@ -98,18 +128,23 @@ func policySuccessorEscape(state GameState, budget *moveBudget) (float64, bool) 
 		if snake.ID != state.You.ID {
 			for i, cell := range snake.Body {
 				if i%32 == 0 && budget.stopped() {
-					return 0, false
+					return 0, 0, false
 				}
 				blocked[cell] = true
 			}
 		}
 	}
 	best := 2.0
+	exits := 0
 	for _, dir := range directions {
 		if budget.stopped() {
-			return 0, false
+			return 0, 0, false
 		}
 		if !policySafeDirectionsWithBudget(state, budget, []direction{dir})[dir.name] {
+			continue
+		}
+		exits++
+		if best == 0 {
 			continue
 		}
 		next := Coord{state.You.Head.X + dir.delta.X, state.You.Head.Y + dir.delta.Y}
@@ -120,18 +155,22 @@ func policySuccessorEscape(state GameState, budget *moveBudget) (float64, bool) 
 		release := make(map[Coord]int)
 		for i, cell := range body {
 			if i%32 == 0 && budget.stopped() {
-				return 0, false
+				return 0, 0, false
 			}
 			release[cell] = max(release[cell], len(body)-i)
 		}
 		// Moving-tail space omits future trail and growth; only the immediate safety check is exact.
 		space := len(policyDistancesWithBudget(next, state.Board, blocked, release, hazards, food, budget))
 		if space >= len(body) {
-			return 0, !budget.stopped()
+			if !countExits {
+				return 0, exits, !budget.stopped()
+			}
+			best = 0
+			continue
 		}
 		best = min(best, 1+float64(len(body)-space)/float64(len(body)))
 	}
-	return best, !budget.stopped()
+	return best, exits, !budget.stopped()
 }
 
 func policySuccessorState(previous GameState, board *rules.BoardState, budget *moveBudget) (GameState, bool) {

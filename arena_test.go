@@ -9,15 +9,126 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
+
+func TestArenaConcurrentHTTPMoves(t *testing.T) {
+	for _, mode := range []string{"success", "faults", "cancel"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			arrivals := make(chan GameState, 4)
+			finished := make(chan struct{}, 4)
+			release := make(chan struct{})
+			var overlap atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/move" {
+					_, _ = fmt.Fprint(w, `{}`)
+					return
+				}
+				defer func() { finished <- struct{}{} }()
+				var state GameState
+				if err := json.NewDecoder(r.Body).Decode(&state); err != nil {
+					t.Error(err)
+					return
+				}
+				arrivals <- state
+				select {
+				case <-release:
+				case <-r.Context().Done():
+					return
+				}
+				if mode == "cancel" {
+					<-r.Context().Done()
+					return
+				}
+				if mode == "faults" {
+					switch state.You.ID {
+					case "seat-0":
+						_, _ = fmt.Fprint(w, `{"move":"diagonal"}`)
+						return
+					case "seat-1":
+						w.WriteHeader(http.StatusServiceUnavailable)
+						return
+					case "seat-2":
+						<-r.Context().Done()
+						return
+					}
+				}
+				_, _ = fmt.Fprint(w, `{"move":"up"}`)
+			}))
+			defer server.Close()
+			go func() {
+				for range 4 {
+					select {
+					case state := <-arrivals:
+						if state.Turn != 0 || len(state.Board.Snakes) != 4 {
+							t.Errorf("request did not use the initial shared board: %+v", state)
+						}
+						overlap.Add(1)
+					case <-ctx.Done():
+						return
+					}
+				}
+				close(release)
+				if mode == "cancel" {
+					cancel()
+				}
+			}()
+			settings := ArenaSettings{Width: 11, Height: 11, Ruleset: "standard", Map: "standard", TimeoutMS: 500, MaxTurns: 1}
+			if mode == "cancel" {
+				settings.MaxTurns = 2
+			}
+			p := Policy{Name: "http", Kind: "baseline", URL: server.URL}
+			job := ArenaJob{ID: "concurrency", Seed: 42, Snakes: []Policy{p, p, p, p}, Trace: true}
+			input, _ := json.Marshal(map[string]any{"settings": settings, "workers": 1, "games": []ArenaJob{job}, "concurrent_moves": true})
+			var output bytes.Buffer
+			err := runArena(ctx, bytes.NewReader(input), &output)
+			if (mode == "cancel" && err != context.Canceled) || (mode != "cancel" && err != nil) {
+				t.Fatalf("run error: %v", err)
+			}
+			var result ArenaResult
+			if err := json.Unmarshal(output.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if overlap.Load() != 4 || len(result.Decisions) != 4 {
+				t.Fatalf("move requests did not overlap: arrivals=%d, decisions=%d", overlap.Load(), len(result.Decisions))
+			}
+			for seat, decision := range result.Decisions {
+				if decision.Seat != seat || decision.Turn != 0 || decision.Move == "" {
+					t.Fatalf("result ordering or fallback changed: %+v", decision)
+				}
+				if mode == "success" && (decision.ResponseMove != "up" || decision.Error != "" || decision.Timeout) {
+					t.Fatalf("unexpected successful response: %+v", decision)
+				}
+			}
+			if mode == "faults" {
+				if result.Snakes[0].Errors != 1 || result.Snakes[1].Errors != 1 || result.Snakes[2].Timeouts != 1 || result.Snakes[3].Errors+result.Snakes[3].Timeouts != 0 {
+					t.Fatalf("faults were attributed to the wrong seats: %+v", result.Snakes)
+				}
+			}
+			if mode == "cancel" && result.Error != context.Canceled.Error() {
+				t.Fatalf("cancellation was not retained: %+v", result)
+			}
+			for range 4 {
+				select {
+				case <-finished:
+				case <-time.After(time.Second):
+					t.Fatal("move handler remained active after the turn")
+				}
+			}
+		})
+	}
+}
 
 func TestArenaDeterminismAndTruncation(t *testing.T) {
 	settings := ArenaSettings{Width: 11, Height: 11, Ruleset: "standard", Map: "standard", TimeoutMS: 500, MaxTurns: 2, FoodSpawnChance: 15, MinimumFood: 1}
 	p := Policy{Name: "baseline", Kind: "baseline"}
 	job := ArenaJob{ID: "fixture", Seed: 42, Snakes: []Policy{p, p, p, p}, Trace: true}
-	first := simulateGame(context.Background(), settings, job)
-	second := simulateGame(context.Background(), settings, job)
+	first := simulateGame(context.Background(), settings, job, false)
+	second := simulateGame(context.Background(), settings, job, false)
 	if first.Error != "" || second.Error != "" {
 		t.Fatalf("simulation errors: %s / %s", first.Error, second.Error)
 	}
@@ -40,37 +151,77 @@ func TestArenaDeterminismAndTruncation(t *testing.T) {
 		}
 	}
 	job.Seed = 0
-	if got := simulateGame(context.Background(), settings, job); got.Error == "" {
+	if got := simulateGame(context.Background(), settings, job, false); got.Error == "" {
 		t.Fatal("seed zero silently permits global RNG")
 	}
 }
 
 func TestArenaHTTPMatchesInProcess(t *testing.T) {
-	server := httptest.NewServer(newHandler())
-	defer server.Close()
-	settings := ArenaSettings{Width: 11, Height: 11, Ruleset: "standard", Map: "standard", TimeoutMS: 500, MaxTurns: 50, FoodSpawnChance: 15, MinimumFood: 1}
-	p := Policy{Name: "baseline", Kind: "baseline"}
-	job := ArenaJob{ID: "parity", Seed: 123, Snakes: []Policy{p, p, p, p}, Trace: true}
-	local := simulateGame(context.Background(), settings, job)
-	job.Snakes[0].URL = server.URL
-	remote := simulateGame(context.Background(), settings, job)
-	if local.Error != "" || remote.Error != "" {
-		t.Fatalf("%s / %s", local.Error, remote.Error)
-	}
-	if !reflect.DeepEqual(local.Frames, remote.Frames) {
-		t.Fatal("HTTP and direct policies produce different games")
-	}
-	for _, metrics := range remote.Snakes {
-		if metrics.Errors != 0 || metrics.Timeouts != 0 {
-			t.Fatalf("unexpected fault: %+v", metrics)
-		}
-	}
-	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) }))
-	defer bad.Close()
-	job.Snakes[0].URL = bad.URL
-	broken := simulateGame(context.Background(), settings, job)
-	if broken.Snakes[0].Errors == 0 {
-		t.Fatal("failed HTTP opponent was silently accepted")
+	for _, concurrent := range []bool{false, true} {
+		t.Run(fmt.Sprint(concurrent), func(t *testing.T) {
+			server := httptest.NewServer(newHandler())
+			defer server.Close()
+			settings := ArenaSettings{Width: 11, Height: 11, Ruleset: "standard", Map: "standard", TimeoutMS: 500, MaxTurns: 50, FoodSpawnChance: 15, MinimumFood: 1}
+			p := Policy{Name: "baseline", Kind: "baseline"}
+			job := ArenaJob{ID: "parity", Seed: 123, Snakes: []Policy{p, p, p, p}, Trace: true}
+			local := simulateGame(context.Background(), settings, job, false)
+			for seat := range job.Snakes {
+				job.Snakes[seat].URL = server.URL
+			}
+			remote := simulateGame(context.Background(), settings, job, concurrent)
+			if local.Error != "" || remote.Error != "" {
+				t.Fatalf("%s / %s", local.Error, remote.Error)
+			}
+			if !reflect.DeepEqual(local.Frames, remote.Frames) {
+				t.Fatal("HTTP and direct policies produce different games")
+			}
+			for _, metrics := range remote.Snakes {
+				if metrics.Errors != 0 || metrics.Timeouts != 0 {
+					t.Fatalf("unexpected fault: %+v", metrics)
+				}
+			}
+			var recorded [4]int
+			for _, decision := range remote.Decisions {
+				if decision.Turn < 0 || decision.Turn >= remote.Turns || decision.Seat < 0 || decision.Seat >= len(recorded) || decision.ElapsedMS < 0 || decision.Timeout || decision.Error != "" || decision.Move == "" || decision.ResponseMove != decision.Move {
+					t.Fatalf("invalid decision trace: %+v", decision)
+				}
+				recorded[decision.Seat]++
+			}
+			for seat, metrics := range remote.Snakes {
+				if recorded[seat] != metrics.Moves {
+					t.Fatalf("seat %d trace has %d moves, want %d", seat, recorded[seat], metrics.Moves)
+				}
+			}
+			bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) }))
+			defer bad.Close()
+			job.Snakes[0].URL = bad.URL
+			broken := simulateGame(context.Background(), settings, job, concurrent)
+			if broken.Snakes[0].Errors == 0 {
+				t.Fatal("failed HTTP opponent was silently accepted")
+			}
+			if len(broken.Decisions) == 0 || broken.Decisions[0].Error == "" || broken.Decisions[0].Move == "" || broken.Decisions[0].ResponseMove != "" {
+				t.Fatal("failed response and applied fallback were not retained")
+			}
+			job.Trace = false
+			if quiet := simulateGame(context.Background(), settings, job, concurrent); len(quiet.Decisions) != 0 {
+				t.Fatal("non-trace games retained per-turn diagnostics")
+			}
+			slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/move" {
+					time.Sleep(25 * time.Millisecond)
+					return
+				}
+				_, _ = fmt.Fprint(w, `{}`)
+			}))
+			defer slow.Close()
+			job.Trace, job.Snakes[0].URL = true, slow.URL
+			settings.TimeoutMS, settings.MaxTurns = 10, 1
+			timed := simulateGame(context.Background(), settings, job, concurrent)
+			first := timed.Decisions[0]
+			if timed.Snakes[0].Timeouts+timed.Snakes[0].Errors != 1 || first.Timeout != (timed.Snakes[0].Timeouts == 1) || first.Error == "" || first.ResponseMove != "" || first.Move == "" {
+				t.Fatalf("timeout response and fallback differ from aggregate: %+v / %+v", first, timed.Snakes[0])
+			}
+		})
 	}
 }
 

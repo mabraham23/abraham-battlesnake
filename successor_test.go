@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"reflect"
 	"testing"
 	"time"
 
@@ -48,6 +49,38 @@ func TestSuccessorAvoidsSavedTraps(t *testing.T) {
 			}
 		})
 	}
+	data, err = os.ReadFile("testdata/successor-mobility.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mobility []struct {
+		Request     GameState `json:"request"`
+		Observed    string    `json:"observed"`
+		Alternative string    `json:"alternative"`
+	}
+	if err := json.Unmarshal(data, &mobility); err != nil {
+		t.Fatal(err)
+	}
+	for _, position := range mobility {
+		policy := defaultPolicies()[5]
+		policy.SuccessorBudgetMS = 200
+		if got := selectMove(position.Request, policy); got != position.Observed {
+			t.Fatalf("published policy changed: got %s, want %s", got, position.Observed)
+		}
+		encoded, _ := json.Marshal(policy)
+		var config map[string]any
+		if err := json.Unmarshal(encoded, &config); err != nil {
+			t.Fatal(err)
+		}
+		config["mobility_weight"] = 25
+		encoded, _ = json.Marshal(config)
+		if err := json.Unmarshal(encoded, &policy); err != nil {
+			t.Fatal(err)
+		}
+		if got := selectMove(position.Request, policy); got != position.Alternative {
+			t.Errorf("mobility policy chose %s, want the route with more safe continuations %s", got, position.Alternative)
+		}
+	}
 }
 
 func TestSuccessorTransitionAndCancellation(t *testing.T) {
@@ -72,19 +105,31 @@ func TestSuccessorTransitionAndCancellation(t *testing.T) {
 	if !safe["right"] || !safe["up"] {
 		t.Fatal("cancellation fixture requires two safe continuations")
 	}
-	if got := policySuccessorPenalties(state, candidates, safe, newMoveBudget(context.Background(), time.Now(), 500), 200); len(got) != 2 {
-		t.Fatalf("uninterrupted supplemental search did not complete: %v", got)
-	}
-	counted := &checkpointContext{Context: context.Background(), cancel: func() {}, remaining: 10000}
-	if got := policySuccessorPenalties(state, candidates[:1], safe, newMoveBudget(counted, time.Now(), 500), 200); len(got) != 1 {
-		t.Fatalf("first candidate did not complete: %v", got)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	// Cancel at the next checkpoint after the first candidate completes.
-	controlled := &checkpointContext{Context: ctx, cancel: cancel, remaining: 10000 - counted.remaining}
-	budget := newMoveBudget(controlled, time.Now(), 500)
-	if got := policySuccessorPenalties(state, candidates, safe, budget, 200); got != nil || ctx.Err() != context.Canceled {
-		t.Fatalf("interrupted supplemental search kept partial penalties: %v, context=%v", got, ctx.Err())
+	for _, weight := range []float64{0, 25} {
+		policy := Policy{SuccessorBudgetMS: 200, TrapPenalty: 1, MobilityWeight: weight}
+		if got := policySuccessorPenalties(state, candidates, safe, newMoveBudget(context.Background(), time.Now(), 500), policy); len(got) != 2 {
+			t.Fatalf("uninterrupted supplemental search did not complete: %v", got)
+		}
+		counted := &checkpointContext{Context: context.Background(), cancel: func() {}, remaining: 10000}
+		if got := policySuccessorPenalties(state, candidates[:1], safe, newMoveBudget(counted, time.Now(), 500), policy); len(got) != 1 {
+			t.Fatalf("first candidate did not complete: %v", got)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		// Cancel at the next checkpoint after the first candidate completes.
+		controlled := &checkpointContext{Context: ctx, cancel: cancel, remaining: 10000 - counted.remaining}
+		budget := newMoveBudget(controlled, time.Now(), 500)
+		if got := policySuccessorPenalties(state, candidates, safe, budget, policy); got != nil || ctx.Err() != context.Canceled {
+			t.Fatalf("interrupted supplemental search kept partial penalties: %v, context=%v", got, ctx.Err())
+		}
+		counted = &checkpointContext{Context: context.Background(), cancel: func() {}, remaining: 100000}
+		baseline := policySuccessorPenalties(state, candidates, safe, newMoveBudget(counted, time.Now(), 500), policy)
+		policy.EscapeDepth = 24
+		routeCtx, routeCancel := context.WithCancel(context.Background())
+		defer routeCancel()
+		routeBudget := newMoveBudget(&checkpointContext{Context: routeCtx, cancel: routeCancel, remaining: 100000 - counted.remaining + 20}, time.Now(), 500)
+		if got := policySuccessorPenalties(state, candidates, safe, routeBudget, policy); !reflect.DeepEqual(got, baseline) || routeCtx.Err() != context.Canceled {
+			t.Fatalf("interrupted route search lost completed baseline penalties: got %v, want %v, context=%v", got, baseline, routeCtx.Err())
+		}
 	}
 }
