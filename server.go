@@ -19,7 +19,7 @@ func handlerWithPolicy(policy Policy) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, BattlesnakeInfoResponse{
-			APIVersion: "1", Author: "mabraham23", Color: "#7C3AED", Head: "default", Tail: "default",
+			APIVersion: "1", Author: "mabraham23", Color: "#B91C1C", Head: "evil", Tail: "sharp",
 		})
 	})
 	debug := os.Getenv("DEBUG_MOVES") == "1"

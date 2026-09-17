@@ -4,10 +4,12 @@
   "hunger_threshold": 45,
   "kind": "heuristic",
   "lookahead": true,
-  "name": "successor",
+  "name": "search",
   "space_weight": 10,
   "successor_lookahead": true,
   "tail_weight": 50,
   "territory_weight": 3,
-  "trap_penalty": 3000
+  "trap_penalty": 3000,
+  "search_depth": 4,
+  "search_budget_ms": 100
 }

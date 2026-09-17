@@ -2,10 +2,38 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
+	"os"
 	"slices"
 	"testing"
 )
+
+func TestPolicyPreservesTerritoryDifference(t *testing.T) {
+	data, err := os.ReadFile("testdata/territory-confinement.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved struct {
+		Request GameState `json:"request"`
+	}
+	if err := json.Unmarshal(data, &saved); err != nil {
+		t.Fatal(err)
+	}
+	policy := defaultPolicies()[5]
+	if got := selectMove(saved.Request, policy); got != "down" {
+		t.Fatalf("published control chose %s, want recorded down", got)
+	}
+	encoded, _ := json.Marshal(policy)
+	var config map[string]any
+	json.Unmarshal(encoded, &config)
+	config["uncapped_territory"] = true
+	encoded, _ = json.Marshal(config)
+	json.Unmarshal(encoded, &policy)
+	if got := selectMove(saved.Request, policy); got != "up" {
+		t.Fatalf("territory-aware policy chose %s, want up toward more controlled room", got)
+	}
+}
 
 func TestSelectMoveCandidateSurvival(t *testing.T) {
 	tests := []struct {
@@ -92,6 +120,13 @@ func TestPolicyOneTurnOfficialOutcomes(t *testing.T) {
 			if got := policySafeMoves(state)["right"]; got != tt.want {
 				t.Errorf("right survives every reply = %v, want %v", got, tt.want)
 			}
+			state.Board.Width, state.Board.Height = 11, 11
+			for i, head := range []Coord{{8, 8}, {10, 8}, {8, 10}} {
+				state.Board.Snakes = append(state.Board.Snakes, Battlesnake{ID: fmt.Sprintf("distant-%d", i), Health: 90, Head: head, Body: []Coord{head, head, head}, Length: 3})
+			}
+			if got := policySafeMoves(state)["right"]; got != tt.want {
+				t.Errorf("five-snake right survives every reply = %v, want %v", got, tt.want)
+			}
 		})
 	}
 	state := policyTestState([]Coord{{1, 2}, {1, 1}, {1, 0}}, 90)
@@ -131,6 +166,16 @@ func TestPolicyValidation(t *testing.T) {
 		func(p *Policy) { p.TrapPenalty = 100001 },
 		func(p *Policy) { p.SuccessorBudgetMS = -1 },
 		func(p *Policy) { p.SuccessorBudgetMS = 201 },
+		func(p *Policy) { p.SurvivalDepth = -1 },
+		func(p *Policy) { p.SurvivalDepth = 1 },
+		func(p *Policy) { p.SurvivalDepth = 6 },
+		func(p *Policy) { p.EscapeDepth = 24 },
+		func(p *Policy) { p.SuccessorLookahead = true; p.EscapeDepth = 7 },
+		func(p *Policy) { p.SuccessorLookahead = true; p.EscapeDepth = 33 },
+		func(p *Policy) { p.SearchDepth = 1 },
+		func(p *Policy) { p.SearchDepth = 7 },
+		func(p *Policy) { p.SearchBudgetMS = 301 },
+		func(p *Policy) { p.SearchWeight = -1 },
 	} {
 		p := valid
 		change(&p)
